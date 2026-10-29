@@ -233,7 +233,7 @@ $('btnCheck').onclick = async e => {
   const d = $('checkIn').value.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
   if (!/^[a-z0-9.*_-]+\.[a-z0-9_-]+$/.test(d)) { $('checkOut').textContent = 'Введи домен, например ads.example.com'; return; }
   e.target.disabled = true;
-  const r = await sh(`${N} check ${d}`);
+  const r = await sh(`${N} check '${d}'`);
   e.target.disabled = false;
   $('checkOut').textContent = (r.stdout || r.stderr).trim();
 };

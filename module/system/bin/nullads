@@ -17,7 +17,7 @@ if [ -z "$NULLADS_BB" ]; then
   exit 1
 fi
 
-VERSION=1.1
+VERSION=1.2
 HOMEPAGE=https://github.com/cfifBOOM/nullads
 DONATE_URL="https://www.donationalerts.com/r/cfifboom"
 UA="NullAds/$VERSION (+$HOMEPAGE)"
@@ -115,6 +115,12 @@ selected_ids() {
   for e in $EXTRAS; do say "$e"; done
   for u in $CUSTOM; do say "$u"; done
 }
+sel_summary() {
+  s="$LEVEL${EXTRAS:+ $EXTRAS}"
+  nc=0; for u in $CUSTOM; do nc=$((nc + 1)); done
+  [ "$nc" -gt 0 ] && s="$s +свои:$nc"
+  say "$s"
+}
 cache_file() {
   case $1 in
     http://*|https://*) say "$CACHE/url_$(printf '%s' "$1" | cksum | cut -d' ' -f1).txt";;
@@ -130,19 +136,31 @@ min_entries() {
 }
 
 # ---------- загрузка ----------
+MAX_MB=64
 pick_downloader() {
-  if command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1; then DL=curl
-  elif [ -x "$TERMUX/bin/curl" ]; then DL=termux
-  else DL=wget; fi
+  DL_CHAIN=""
+  if command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1; then DL_CHAIN="curl"; fi
+  [ -x "$TERMUX/bin/curl" ] && DL_CHAIN="$DL_CHAIN termux"
+  DL_CHAIN="$DL_CHAIN wget"
+  set -- $DL_CHAIN; DL=$1
 }
 fetch() {
-  rm -f "$2"
-  case $DL in
-    curl)   curl -fsL -A "$UA" --connect-timeout 15 --max-time 300 -o "$2" "$1";;
-    termux) LD_LIBRARY_PATH="$TERMUX/lib" "$TERMUX/bin/curl" --cacert "$TERMUX/etc/tls/cert.pem" \
-              -fsL -A "$UA" --connect-timeout 15 --max-time 300 -o "$2" "$1";;
-    *)      wget -q -T 30 -U "$UA" -O "$2" "$1";;
-  esac
+  max=$((MAX_MB * 1048576))
+  for m in $DL_CHAIN; do
+    rm -f "$2"
+    case $m in
+      curl)   curl -fsL -A "$UA" --max-filesize "$max" --connect-timeout 15 --max-time 300 -o "$2" "$1";;
+      termux) LD_LIBRARY_PATH="$TERMUX/lib" "$TERMUX/bin/curl" --cacert "$TERMUX/etc/tls/cert.pem" \
+                -fsL -A "$UA" --max-filesize "$max" --connect-timeout 15 --max-time 300 -o "$2" "$1";;
+      wget)   wget -q -T 30 -U "$UA" -O "$2" "$1";;
+    esac
+    rc=$?
+    if [ "$rc" = 63 ]; then rm -f "$2"; warn "Файл больше $MAX_MB МБ, пропускаю: $1"; return 1; fi
+    [ "$rc" = 0 ] || continue
+    if [ $(( $(wc -c < "$2") )) -gt "$max" ]; then rm -f "$2"; warn "Файл больше $MAX_MB МБ, пропускаю: $1"; return 1; fi
+    return 0
+  done
+  rm -f "$2"; return 1
 }
 sane() {
   [ -s "$1" ] || return 1
@@ -154,7 +172,7 @@ sane() {
 HAVE_LOCK=0
 lock() {
   [ "$HAVE_LOCK" = 1 ] && return 0
-  if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null; fi
+  if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +120 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null; fi
   if ! mkdir "$LOCK" 2>/dev/null; then err "Уже идёт обновление или пересборка, подожди"; return 1; fi
   HAVE_LOCK=1
   trap 'rmdir "$LOCK" 2>/dev/null' EXIT
@@ -242,7 +260,7 @@ build() {
   DOMAINS=$(wc -l < "$B/sorted" | tr -d ' ')
   {
     stock_hosts
-    printf '# NullAds %s | %s | доменов: %s | %s\n' "$VERSION" "$(selected_ids | tr '\n' ' ' | sed 's/ $//')" "$DOMAINS" "$(date '+%Y-%m-%d %H:%M')"
+    printf '# NullAds %s | %s | доменов: %s | %s\n' "$VERSION" "$(sel_summary)" "$DOMAINS" "$(date '+%Y-%m-%d %H:%M')"
     awk '{ if (NR % 9 == 1) printf "0.0.0.0 %s", $0; else printf " %s", $0; if (NR % 9 == 0) printf "\n" }
          END { if (NR % 9 != 0) printf "\n" }' "$B/sorted"
   } > "$B/hosts"
@@ -253,6 +271,12 @@ mounted() { cmp -s "$HOSTS" /system/etc/hosts; }
 
 apply() {
   mkdir -p "${HOSTS%/*}"
+  need=$(( $(wc -c < "$1") / 1024 + 1024 ))
+  have=$(df -k "${HOSTS%/*}" 2>/dev/null | awk 'NR == 2 { print $4 }')
+  old=0; [ -f "$HOSTS" ] && old=$(( $(wc -c < "$HOSTS") / 1024 ))
+  if [ -n "$have" ] && [ $((have + old)) -lt "$need" ]; then
+    err "Мало места в /data: нужно ~$((need / 1024)) МБ. hosts не тронут."; return 1
+  fi
   # Пишем в тот же файл (тот же inode), чтобы подмонтированный hosts обновился без перезагрузки.
   cat "$1" > "$HOSTS" || { err "Не удалось записать $HOSTS"; return 1; }
   chmod 644 "$HOSTS"; chown 0:0 "$HOSTS" 2>/dev/null
@@ -294,6 +318,7 @@ _update() {
   rm -rf "$CONF_DIR/build"
   LAST_OK=$(date +%s); save_state
   say "Готово: заблокировано доменов — $DOMAINS."
+  [ "$DOMAINS" -gt 1000000 ] && warn "Больше миллиона доменов: каждый DNS-запрос заметно замедлится. Лучше уровень пониже."
   [ -n "$failed" ] && warn "Не удалось скачать:$failed. Проверь интернет или VPN и повтори."
   [ "$DL" = wget ] && [ -n "$failed" ] && warn "Если не качает по https, поставь curl в Termux: pkg install curl"
   return 0
@@ -369,8 +394,6 @@ do_check() {
     f=$(cache_file "$id")
     [ -s "$f" ] && grep -qE "(^|[[:space:]])$esc([[:space:]]|\$)" "$f" && say "  найден в списке: $id"
   done
-  ip=$(ping -c 1 -W 1 "$d" 2>/dev/null | head -n 1 | sed -n 's/^PING [^(]*(\([^)]*\)).*/\1/p')
-  [ -n "$ip" ] && say "  система сейчас отдаёт: $ip"
 }
 
 set_level() {
