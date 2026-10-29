@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check scripts
+        run: |
+          for f in module/system/bin/nullads module/*.sh; do sh -n "$f"; done
+          grep -q "^version=${GITHUB_REF_NAME}$" module/module.prop || { echo "module.prop version != ${GITHUB_REF_NAME}"; exit 1; }
+
+      - name: Build module zip
+        run: |
+          cp LICENSE THIRD_PARTY.md module/
+          chmod 755 module/system/bin/nullads module/*.sh module/META-INF/com/google/android/update-binary
+          cd module && zip -r9 "../NullAds-${GITHUB_REF_NAME}.zip" . -x '.*'
+          cd .. && unzip -l "NullAds-${GITHUB_REF_NAME}.zip"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" "NullAds-${GITHUB_REF_NAME}.zip" --title "NullAds ${GITHUB_REF_NAME}" --notes-file CHANGELOG.md

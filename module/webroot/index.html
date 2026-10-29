@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NullAds</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #16181d; --muted: #6b7280; --line: #e3e5ea;
+    --accent: #2f6fed; --accent-text: #ffffff; --ok: #1f9d55; --warn: #c27c0e; --bad: #d64545;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #181b21; --text: #e8eaee; --muted: #9aa1ad; --line: #2a2f38;
+            --accent: #5b8cff; --accent-text: #0b0d12; --ok: #3ecf7a; --warn: #f0b03f; --bad: #ff6b6b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) 16px 32px; }
+  main { max-width: 640px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  h1 { margin: 0; font-size: 24px; letter-spacing: -0.02em; }
+  h2 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+  .pill { padding: 4px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; border: 1px solid var(--line); white-space: nowrap; }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 13px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  button { appearance: none; border: 1px solid var(--line); background: transparent; color: var(--text);
+           border-radius: 10px; padding: 10px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: .5; cursor: default; }
+  label.opt { display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: start; padding: 8px 0; border-top: 1px solid var(--line); }
+  label.opt:first-of-type { border-top: 0; }
+  label.opt input { margin: 3px 0 0; width: 18px; height: 18px; accent-color: var(--accent); }
+  label.opt small { display: block; color: var(--muted); }
+  input[type=text], select, textarea { width: 100%; font: inherit; color: var(--text); background: var(--bg);
+           border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  textarea { min-height: 110px; font-family: var(--mono); font-size: 13px; resize: vertical; }
+  .check { display: flex; gap: 8px; }
+  .check input { flex: 1; min-width: 0; }
+  #checkOut { margin-top: 8px; white-space: pre-wrap; font-size: 14px; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.5 var(--mono); color: var(--muted); max-height: 260px; overflow: auto; }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  footer { color: var(--muted); font-size: 13px; text-align: center; display: grid; gap: 10px; padding-top: 4px; }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>NullAds</h1>
+    <span id="pill" class="pill">…</span>
+  </header>
+
+  <section class="card">
+    <div class="stats">
+      <div class="stat"><b id="sDomains">—</b><span>доменов заблокировано</span></div>
+      <div class="stat"><b id="sSize">—</b><span>размер hosts</span></div>
+      <div class="stat"><b id="sUpdated">—</b><span>обновлено</span></div>
+      <div class="stat"><b id="sDl">—</b><span>загрузчик</span></div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button id="btnUpdate" class="primary">Обновить списки</button>
+      <button id="btnPause">Пауза</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Уровень блокировки</h2>
+    <div id="levels"></div>
+  </section>
+
+  <section class="card">
+    <h2>Дополнительные списки</h2>
+    <div id="extras"></div>
+    <div class="row" style="margin-top:10px"><button id="btnApply" class="primary">Сохранить и обновить</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Проверить домен</h2>
+    <div class="check">
+      <input id="checkIn" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="ads.example.com">
+      <button id="btnCheck">Проверить</button>
+    </div>
+    <div id="checkOut"></div>
+  </section>
+
+  <section class="card">
+    <h2>Белый список</h2>
+    <textarea id="allow" spellcheck="false"></textarea>
+    <p class="hint">По домену на строку. <code>*.example.com</code> разрешает домен со всеми поддоменами.</p>
+    <div class="row" style="margin-top:8px"><button id="btnAllow">Сохранить</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Чёрный список</h2>
+    <textarea id="block" spellcheck="false"></textarea>
+    <p class="hint">Эти домены блокируются всегда, даже если есть в белом списке.</p>
+    <div class="row" style="margin-top:8px"><button id="btnBlock">Сохранить</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Автообновление</h2>
+    <select id="auto">
+      <option value="0">Выключено</option>
+      <option value="1">Каждый день</option>
+      <option value="3">Раз в 3 дня</option>
+      <option value="7">Раз в неделю</option>
+      <option value="14">Раз в 2 недели</option>
+    </select>
+  </section>
+
+  <section class="card">
+    <h2>Журнал</h2>
+    <pre id="log">—</pre>
+  </section>
+
+  <footer>
+    <div>Списки: <a href="#" data-url="https://github.com/hagezi/dns-blocklists">HaGeZi</a> (GPL-3.0) ·
+      <a href="#" data-url="https://github.com/StevenBlack/hosts">StevenBlack</a> (MIT)</div>
+    <div><a href="#" data-url="https://github.com/cfifBOOM/nullads">NullAds на GitHub</a></div>
+    <div id="donateBox" hidden><button id="btnDonate">Поддержать NullAds</button></div>
+  </footer>
+</main>
+
+<script>
+const N = 'sh /data/adb/modules/nullads/system/bin/nullads';
+const DONATE_URL = 'https://www.donationalerts.com/r/cfifboom';
+const CONF = '/data/adb/nullads';
+const LEVELS = [
+  ['light', 'Лёгкий', 'Минимум поломок (HaGeZi Light)'],
+  ['normal', 'Обычный', 'Реклама, трекеры, фишинг (HaGeZi Normal)'],
+  ['pro', 'Про', 'Рекомендуемый баланс (HaGeZi Pro)'],
+  ['proplus', 'Про++', 'Жёстче, возможны поломки (HaGeZi Pro++)'],
+  ['ultimate', 'Максимум', 'Агрессивно, поломки вероятны (HaGeZi Ultimate)'],
+  ['steven', 'Классика', 'StevenBlack Unified'],
+];
+const EXTRAS = [
+  ['xiaomi', 'Xiaomi / HyperOS', 'Телеметрия Xiaomi'],
+  ['tiktok', 'TikTok', 'Слежка TikTok'],
+  ['samsung', 'Samsung', 'Телеметрия Samsung'],
+  ['gambling', 'Ставки', 'Казино и букмекеры'],
+  ['nsfw', '18+', 'Сайты для взрослых'],
+  ['social', 'Соцсети', 'Facebook, Instagram, TikTok и др.'],
+  ['fakenews', 'Фейки', 'Фейковые новости'],
+];
+
+let seq = 0;
+function sh(cmd) {
+  return new Promise(resolve => {
+    if (typeof ksu === 'undefined' || !ksu.exec) {
+      resolve({ errno: 1, stdout: '', stderr: 'Нет доступа к KernelSU API: открой страницу из менеджера root.' });
+      return;
+    }
+    const cb = `nullads_cb_${Date.now()}_${seq++}`;
+    window[cb] = (errno, stdout, stderr) => { delete window[cb]; resolve({ errno, stdout, stderr }); };
+    ksu.exec(cmd, '{}', cb);
+  });
+}
+const $ = id => document.getElementById(id);
+const toast = m => { try { ksu.toast(m); } catch (e) {} };
+const b64 = s => { let bin = ''; new TextEncoder().encode(s).forEach(b => bin += String.fromCharCode(b)); return btoa(bin); };
+const log = (text) => { $('log').textContent = (text || '').trim() || '—'; };
+
+function ago(ts) {
+  if (!ts) return 'никогда';
+  const s = Math.floor(Date.now() / 1000) - ts;
+  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))} мин назад`;
+  if (s < 86400) return `${Math.floor(s / 3600)} ч назад`;
+  return `${Math.floor(s / 86400)} дн назад`;
+}
+
+function renderOptions(st) {
+  const extras = (st.extras || '').split(/\s+/).filter(Boolean);
+  $('levels').innerHTML = LEVELS.map(([id, name, desc]) =>
+    `<label class="opt"><input type="radio" name="level" value="${id}" ${st.level === id ? 'checked' : ''}>
+       <span>${name}<small>${desc}</small></span></label>`).join('');
+  $('extras').innerHTML = EXTRAS.map(([id, name, desc]) =>
+    `<label class="opt"><input type="checkbox" name="extra" value="${id}" ${extras.includes(id) ? 'checked' : ''}>
+       <span>${name}<small>${desc}</small></span></label>`).join('');
+}
+
+let state = null;
+async function refresh(full) {
+  const r = await sh(`${N} status --json`);
+  try { state = JSON.parse(r.stdout.trim().split('\n').pop()); }
+  catch (e) { $('pill').textContent = 'ошибка'; $('pill').className = 'pill bad'; log(r.stderr || r.stdout); return; }
+  const pill = $('pill');
+  if (state.paused) { pill.textContent = 'на паузе'; pill.className = 'pill warn'; }
+  else if (!state.mounted) { pill.textContent = 'нужна перезагрузка'; pill.className = 'pill warn'; }
+  else { pill.textContent = 'включено'; pill.className = 'pill ok'; }
+  $('sDomains').textContent = Number(state.domains || 0).toLocaleString('ru-RU');
+  $('sSize').textContent = `${(state.size / 1048576).toFixed(1)} МБ`;
+  $('sUpdated').textContent = ago(state.last_ok);
+  $('sDl').textContent = state.dl;
+  $('btnPause').textContent = state.paused ? 'Включить' : 'Пауза';
+  $('auto').value = String([0, 1, 3, 7, 14].includes(state.auto_days) ? state.auto_days : 7);
+  if (full) {
+    renderOptions(state);
+    const [a, b] = await Promise.all([sh(`cat ${CONF}/allow.txt`), sh(`cat ${CONF}/block.txt`)]);
+    $('allow').value = a.stdout; $('block').value = b.stdout;
+  }
+}
+
+async function run(btn, cmd, okMsg) {
+  const buttons = [...document.querySelectorAll('button')];
+  buttons.forEach(b => b.disabled = true);
+  const label = btn.textContent; btn.textContent = 'Работаю…';
+  log('…');
+  const r = await sh(cmd);
+  log([r.stdout, r.stderr].filter(Boolean).join('\n'));
+  btn.textContent = label;
+  buttons.forEach(b => b.disabled = false);
+  toast(r.errno === 0 ? okMsg : 'Ошибка — смотри журнал');
+  await refresh(false);
+  return r.errno === 0;
+}
+
+$('btnUpdate').onclick = e => run(e.target, `${N} update`, 'Списки обновлены');
+$('btnPause').onclick = e => run(e.target, state && state.paused ? `${N} resume` : `${N} pause`, 'Готово');
+$('btnApply').onclick = e => {
+  const level = (document.querySelector('input[name=level]:checked') || {}).value || 'pro';
+  const extras = [...document.querySelectorAll('input[name=extra]:checked')].map(i => i.value);
+  run(e.target, `${N} set ${level} ${extras.join(' ')} && ${N} update`, 'Сохранено и обновлено');
+};
+$('btnCheck').onclick = async e => {
+  const d = $('checkIn').value.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+  if (!/^[a-z0-9.*_-]+\.[a-z0-9_-]+$/.test(d)) { $('checkOut').textContent = 'Введи домен, например ads.example.com'; return; }
+  e.target.disabled = true;
+  const r = await sh(`${N} check ${d}`);
+  e.target.disabled = false;
+  $('checkOut').textContent = (r.stdout || r.stderr).trim();
+};
+$('btnAllow').onclick = e => run(e.target, `printf '%s' '${b64($('allow').value)}' | base64 -d > ${CONF}/allow.txt && ${N} rebuild`, 'Белый список применён');
+$('btnBlock').onclick = e => run(e.target, `printf '%s' '${b64($('block').value)}' | base64 -d > ${CONF}/block.txt && ${N} rebuild`, 'Чёрный список применён');
+$('auto').onchange = async e => {
+  const r = await sh(`${N} auto ${e.target.value}`);
+  toast((r.stdout || r.stderr).trim());
+};
+
+const openUrl = url => { if (/^https:\/\/[A-Za-z0-9._~:\/?#@!$&()*+,;=%-]+$/.test(url)) sh(`am start -a android.intent.action.VIEW -d '${url}'`); };
+document.querySelectorAll('a[data-url]').forEach(a => a.onclick = ev => { ev.preventDefault(); openUrl(a.dataset.url); });
+if (DONATE_URL.startsWith('https://')) { $('donateBox').hidden = false; $('btnDonate').onclick = () => openUrl(DONATE_URL); }
+
+refresh(true);
+</script>
+</body>
+</html>

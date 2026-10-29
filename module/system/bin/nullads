@@ -1,0 +1,558 @@
+#!/system/bin/sh
+# NullAds — системная блокировка рекламы через hosts.
+# KernelSU / SukiSU / APatch / Magisk. Запуск: su -c nullads [команда]
+# Код: MIT, https://github.com/cfifBOOM/nullads
+# Списки не входят в модуль: они скачиваются на устройстве напрямую у авторов
+# (HaGeZi — GPL-3.0, StevenBlack — MIT) и используются по их лицензиям.
+
+# Работаем в busybox ash со всеми апплетами (awk, sort, wget...).
+if [ -z "$NULLADS_BB" ]; then
+  for bb in /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/busybox; do
+    if [ -x "$bb" ]; then
+      export NULLADS_BB="$bb" ASH_STANDALONE=1
+      exec "$bb" sh "$0" "$@"
+    fi
+  done
+  echo "NullAds: не найден busybox менеджера root" >&2
+  exit 1
+fi
+
+VERSION=1.1
+HOMEPAGE=https://github.com/cfifBOOM/nullads
+DONATE_URL="https://www.donationalerts.com/r/cfifboom"
+UA="NullAds/$VERSION (+$HOMEPAGE)"
+MODID=nullads
+MODDIR=${MODDIR:-/data/adb/modules/$MODID}
+HOSTS=$MODDIR/system/etc/hosts
+CONF_DIR=/data/adb/nullads
+CONF=$CONF_DIR/config
+STATE=$CONF_DIR/state
+CACHE=$CONF_DIR/cache
+ALLOW=$CONF_DIR/allow.txt
+BLOCK=$CONF_DIR/block.txt
+LOG=$CONF_DIR/last.log
+LOCK=$CONF_DIR/.lock
+TERMUX=/data/data/com.termux/files/usr
+LEVELS="light normal pro proplus ultimate steven"
+EXTRAS_ALL="xiaomi tiktok samsung gambling nsfw social fakenews"
+export LC_ALL=C
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf '! %s\n' "$*"; }
+err()  { printf '✗ %s\n' "$*" >&2; }
+
+if [ ! -w /data/adb ]; then err "Нужен root: su -c nullads $*"; exit 1; fi
+mkdir -p "$CACHE"
+
+LEVEL=pro; EXTRAS=""; AUTO_DAYS=7; CUSTOM=""
+[ -f "$CONF" ] && . "$CONF"
+LAST_OK=0; DOMAINS=0; PAUSED=0
+[ -f "$STATE" ] && . "$STATE"
+case " $LEVELS " in *" $LEVEL "*) ;; *) LEVEL=pro;; esac
+
+save_conf() {
+  {
+    say "# NullAds — настройки (можно править руками)"
+    say "LEVEL=$LEVEL"
+    say "EXTRAS=\"$EXTRAS\""
+    say "AUTO_DAYS=$AUTO_DAYS"
+    say "CUSTOM=\"$CUSTOM\""
+  } > "$CONF.tmp" && mv -f "$CONF.tmp" "$CONF"
+}
+save_state() {
+  printf 'LAST_OK=%s\nDOMAINS=%s\nPAUSED=%s\n' "$LAST_OK" "$DOMAINS" "$PAUSED" > "$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"
+}
+
+# ---------- каталог списков ----------
+describe() {
+  case $1 in
+    light)    say "Лёгкий: минимум поломок (HaGeZi Light)";;
+    normal)   say "Обычный: реклама, трекеры, фишинг (HaGeZi Normal)";;
+    pro)      say "Про: рекомендуемый баланс (HaGeZi Pro)";;
+    proplus)  say "Про++: жёстче, возможны поломки (HaGeZi Pro++)";;
+    ultimate) say "Максимум: агрессивно, поломки вероятны (HaGeZi Ultimate)";;
+    steven)   say "Классика: StevenBlack Unified";;
+    xiaomi)   say "Телеметрия Xiaomi / HyperOS";;
+    tiktok)   say "Слежка TikTok";;
+    samsung)  say "Телеметрия Samsung";;
+    gambling) say "Казино и ставки";;
+    nsfw)     say "Сайты для взрослых";;
+    social)   say "Соцсети: Facebook, Instagram, TikTok и др.";;
+    fakenews) say "Фейковые новости";;
+    *)        say "$1";;
+  esac
+}
+src_path() {
+  HZ=hagezi/dns-blocklists-legacy@main/hosts
+  SB=StevenBlack/hosts@master
+  case $1 in
+    light)    say "$HZ/light-compressed.txt";;
+    normal)   say "$HZ/multi-compressed.txt";;
+    pro)      say "$HZ/pro-compressed.txt";;
+    proplus)  say "$HZ/pro.plus-compressed.txt";;
+    ultimate) say "$HZ/ultimate-compressed.txt";;
+    xiaomi)   say "$HZ/native.xiaomi-compressed.txt";;
+    tiktok)   say "$HZ/native.tiktok-compressed.txt";;
+    samsung)  say "$HZ/native.samsung-compressed.txt";;
+    steven)   say "$SB/hosts";;
+    gambling) say "$SB/alternates/gambling-only/hosts";;
+    nsfw)     say "$SB/alternates/porn-only/hosts";;
+    social)   say "$SB/alternates/social-only/hosts";;
+    fakenews) say "$SB/alternates/fakenews-only/hosts";;
+    *) return 1;;
+  esac
+}
+src_urls() {
+  case $1 in http://*|https://*) say "$1"; return 0;; esac
+  p=$(src_path "$1") || return 1
+  repo=${p%%@*}; rest=${p#*@}; ref=${rest%%/*}; path=${rest#*/}
+  say "https://raw.githubusercontent.com/$repo/$ref/$path"
+  say "https://cdn.jsdelivr.net/gh/$repo@$ref/$path"
+  say "https://fastly.jsdelivr.net/gh/$repo@$ref/$path"
+}
+selected_ids() {
+  say "$LEVEL"
+  for e in $EXTRAS; do say "$e"; done
+  for u in $CUSTOM; do say "$u"; done
+}
+cache_file() {
+  case $1 in
+    http://*|https://*) say "$CACHE/url_$(printf '%s' "$1" | cksum | cut -d' ' -f1).txt";;
+    *) say "$CACHE/$1.txt";;
+  esac
+}
+min_entries() {
+  case $1 in
+    light|normal|pro|proplus|ultimate|steven) say 1000;;
+    http://*|https://*) say 1;;
+    *) say 20;;
+  esac
+}
+
+# ---------- загрузка ----------
+pick_downloader() {
+  if command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1; then DL=curl
+  elif [ -x "$TERMUX/bin/curl" ]; then DL=termux
+  else DL=wget; fi
+}
+fetch() {
+  rm -f "$2"
+  case $DL in
+    curl)   curl -fsL -A "$UA" --connect-timeout 15 --max-time 300 -o "$2" "$1";;
+    termux) LD_LIBRARY_PATH="$TERMUX/lib" "$TERMUX/bin/curl" --cacert "$TERMUX/etc/tls/cert.pem" \
+              -fsL -A "$UA" --connect-timeout 15 --max-time 300 -o "$2" "$1";;
+    *)      wget -q -T 30 -U "$UA" -O "$2" "$1";;
+  esac
+}
+sane() {
+  [ -s "$1" ] || return 1
+  head -n 30 "$1" | grep -qi '<html' && return 1
+  n=$(grep -cv -e '^[[:space:]]*[#!]' -e '^[[:space:]]*$' "$1")
+  [ "${n:-0}" -ge "$(min_entries "$2")" ]
+}
+
+HAVE_LOCK=0
+lock() {
+  [ "$HAVE_LOCK" = 1 ] && return 0
+  if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null; fi
+  if ! mkdir "$LOCK" 2>/dev/null; then err "Уже идёт обновление или пересборка, подожди"; return 1; fi
+  HAVE_LOCK=1
+  trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+  trap 'rmdir "$LOCK" 2>/dev/null; exit 130' INT TERM
+}
+unlock() {
+  [ "$HAVE_LOCK" = 1 ] || return 0
+  rmdir "$LOCK" 2>/dev/null; HAVE_LOCK=0
+  trap - EXIT INT TERM
+}
+locked() { lock || return 1; "$@"; rc=$?; unlock; return $rc; }
+
+# ---------- сборка hosts ----------
+AWK_PARSE='
+function valid(d) {
+  if (length(d) < 4 || length(d) > 253) return 0
+  if (index(d, ".") == 0) return 0
+  if (d ~ /[^a-z0-9._-]/) return 0
+  if (d ~ /^[.-]/ || d ~ /[.-]$/ || index(d, "..")) return 0
+  if (d ~ /^[0-9.]+$/) return 0
+  return 1
+}
+function allowed(d,   p, i) {
+  if (d in allow) return 1
+  p = d
+  while (1) {
+    if (p in wild) return 1
+    i = index(p, ".")
+    if (i == 0) return 0
+    p = substr(p, i + 1)
+  }
+}
+function emit(d, force) {
+  if (substr(d, 1, 2) == "*.") d = substr(d, 3)
+  if (!valid(d) || (d in skip)) return
+  if (!force && allowed(d)) return
+  print d
+}
+BEGIN {
+  ns = split("localhost localhost.localdomain local broadcasthost ip6-localhost ip6-loopback ip6-localnet ip6-mcastprefix ip6-allnodes ip6-allrouters ip6-allhosts", s, " ")
+  for (k = 1; k <= ns; k++) skip[s[k]] = 1
+  ns = split("raw.githubusercontent.com cdn.jsdelivr.net fastly.jsdelivr.net github.com objects.githubusercontent.com", s, " ")
+  for (k = 1; k <= ns; k++) allow[s[k]] = 1
+  while ((getline l < allowf) > 0) {
+    sub(/#.*/, "", l); gsub(/[ \t\r]/, "", l); l = tolower(l)
+    if (l == "") continue
+    if (substr(l, 1, 2) == "*.") wild[substr(l, 3)] = 1; else allow[l] = 1
+  }
+  close(allowf)
+}
+{
+  line = $0
+  sub(/\r$/, "", line)
+  if (line ~ /^[ \t]*[#!]/) next
+  sub(/[ \t]+#.*$/, "", line)
+  sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+  if (line == "") next
+  force = (FILENAME == blockf)
+  if (substr(line, 1, 2) == "@@") next
+  if (substr(line, 1, 2) == "||") {
+    d = substr(line, 3); sub(/\^.*$/, "", d)
+    if (d ~ /[\/*$]/) next
+    emit(tolower(d), force); next
+  }
+  n = split(line, f, /[ \t]+/)
+  start = 1
+  if (n > 1 && (f[1] ~ /^[0-9.]+$/ || index(f[1], ":"))) start = 2
+  for (i = start; i <= n; i++) emit(tolower(f[i]), force)
+}'
+
+stock_hosts() { printf '127.0.0.1 localhost\n::1 ip6-localhost\n'; }
+
+build() {
+  files=""
+  for id in $(selected_ids); do
+    f=$(cache_file "$id")
+    if [ -s "$f" ]; then files="$files $f"; else warn "нет скачанного списка: $id"; fi
+  done
+  [ -n "$files" ] || { err "Нет ни одного скачанного списка. Выполни: nullads update"; return 1; }
+  B=$CONF_DIR/build; rm -rf "$B"; mkdir -p "$B"
+  touch "$ALLOW" "$BLOCK"
+  # shellcheck disable=SC2086
+  awk -v allowf="$ALLOW" -v blockf="$BLOCK" "$AWK_PARSE" $files "$BLOCK" > "$B/list" || { err "Ошибка разбора списков"; return 1; }
+  sort -u "$B/list" > "$B/sorted" || { err "Ошибка сортировки"; return 1; }
+  DOMAINS=$(wc -l < "$B/sorted" | tr -d ' ')
+  {
+    stock_hosts
+    printf '# NullAds %s | %s | доменов: %s | %s\n' "$VERSION" "$(selected_ids | tr '\n' ' ' | sed 's/ $//')" "$DOMAINS" "$(date '+%Y-%m-%d %H:%M')"
+    awk '{ if (NR % 9 == 1) printf "0.0.0.0 %s", $0; else printf " %s", $0; if (NR % 9 == 0) printf "\n" }
+         END { if (NR % 9 != 0) printf "\n" }' "$B/sorted"
+  } > "$B/hosts"
+  rm -f "$B/list" "$B/sorted"
+}
+
+mounted() { cmp -s "$HOSTS" /system/etc/hosts; }
+
+apply() {
+  mkdir -p "${HOSTS%/*}"
+  # Пишем в тот же файл (тот же inode), чтобы подмонтированный hosts обновился без перезагрузки.
+  cat "$1" > "$HOSTS" || { err "Не удалось записать $HOSTS"; return 1; }
+  chmod 644 "$HOSTS"; chown 0:0 "$HOSTS" 2>/dev/null
+  chcon u:object_r:system_file:s0 "$HOSTS" 2>/dev/null
+  [ -n "$NULLADS_INSTALL" ] && return 0
+  mounted || warn "Файл готов, но системный hosts ещё не подменён. Перезагрузи телефон (после установки это нормально)."
+  return 0
+}
+
+# ---------- команды ----------
+do_update() { locked _update; }
+_update() {
+  pick_downloader
+  say "Обновляю списки ($DL)…"
+  failed=""
+  for id in $(selected_ids); do
+    out=$(cache_file "$id"); tmp=$out.part; got=0
+    for u in $(src_urls "$id"); do
+      host=${u#*://}; host=${host%%/*}
+      if fetch "$u" "$tmp" && sane "$tmp" "$id"; then
+        mv -f "$tmp" "$out"; got=1
+        say "  ✓ $id ($host, $(( $(wc -c < "$out") / 1024 )) КБ)"
+        break
+      fi
+    done
+    rm -f "$tmp"
+    if [ $got = 0 ]; then
+      if [ -s "$out" ]; then warn "$id: не скачался, беру прошлую копию"; else failed="$failed $id"; warn "$id: не скачался"; fi
+    fi
+  done
+  build || return 1
+  if [ "$PAUSED" = 1 ]; then
+    rm -rf "$CONF_DIR/build"
+    LAST_OK=$(date +%s); save_state
+    say "Списки обновлены, но блокировка на паузе. Включить: nullads resume"
+    return 0
+  fi
+  apply "$CONF_DIR/build/hosts" || return 1
+  rm -rf "$CONF_DIR/build"
+  LAST_OK=$(date +%s); save_state
+  say "Готово: заблокировано доменов — $DOMAINS."
+  [ -n "$failed" ] && warn "Не удалось скачать:$failed. Проверь интернет или VPN и повтори."
+  [ "$DL" = wget ] && [ -n "$failed" ] && warn "Если не качает по https, поставь curl в Termux: pkg install curl"
+  return 0
+}
+
+do_rebuild() { locked _rebuild; }
+_rebuild() {
+  build || return 1
+  if [ "$PAUSED" = 1 ]; then rm -rf "$CONF_DIR/build"; save_state; say "Пересобрано (блокировка на паузе)."; return 0; fi
+  apply "$CONF_DIR/build/hosts" || return 1
+  rm -rf "$CONF_DIR/build"; save_state; say "Применено: доменов — $DOMAINS."
+}
+
+do_pause() { locked _pause; }
+_pause() {
+  stock_hosts > "$CONF_DIR/stock"
+  apply "$CONF_DIR/stock" || return 1
+  PAUSED=1; save_state
+  say "Блокировка на паузе. Включить: nullads resume"
+}
+
+do_resume() { locked _resume; }
+_resume() {
+  PAUSED=0
+  build || return 1
+  apply "$CONF_DIR/build/hosts" || return 1
+  rm -rf "$CONF_DIR/build"; save_state; say "Блокировка включена: доменов — $DOMAINS."
+}
+
+norm_domain() {
+  d=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  d=${d#http://}; d=${d#https://}; d=${d%%/*}; d=${d%%:*}
+  case $d in ''|*[!a-z0-9.*_-]*) return 1;; esac
+  printf '%s' "$d"
+}
+
+list_cmd() {
+  op=$1
+  d=$(norm_domain "$2") || { err "Укажи домен: nullads $op example.com"; return 1; }
+  case $op in
+    allow)   file=$ALLOW; add=1;;
+    unallow) file=$ALLOW; add=0;;
+    block)   file=$BLOCK; add=1; d=${d#\*.};;
+    unblock) file=$BLOCK; add=0; d=${d#\*.};;
+  esac
+  touch "$file"
+  if [ $add = 1 ]; then
+    grep -qxF "$d" "$file" || say "$d" >> "$file"
+  else
+    grep -vxF "$d" "$file" > "$file.tmp"; mv -f "$file.tmp" "$file"
+  fi
+  case $op in
+    allow)   say "В белом списке: $d";;
+    unallow) say "Убран из белого списка: $d";;
+    block)   say "В чёрном списке: $d";;
+    unblock) say "Убран из чёрного списка: $d";;
+  esac
+  do_rebuild
+}
+
+do_check() {
+  d=$(norm_domain "$1") || { err "Укажи домен: nullads check example.com"; return 1; }
+  d=${d#\*.}
+  esc=$(printf '%s' "$d" | sed 's/[.]/\\./g')
+  if grep -qE "^0\.0\.0\.0 (.* )?$esc( |\$)" "$HOSTS" 2>/dev/null; then
+    say "$d — ЗАБЛОКИРОВАН"
+  else
+    say "$d — не заблокирован"
+  fi
+  grep -qxF "$d" "$ALLOW" 2>/dev/null && say "  есть в белом списке"
+  grep -qxF "$d" "$BLOCK" 2>/dev/null && say "  есть в чёрном списке"
+  for id in $(selected_ids); do
+    f=$(cache_file "$id")
+    [ -s "$f" ] && grep -qE "(^|[[:space:]])$esc([[:space:]]|\$)" "$f" && say "  найден в списке: $id"
+  done
+  ip=$(ping -c 1 -W 1 "$d" 2>/dev/null | head -n 1 | sed -n 's/^PING [^(]*(\([^)]*\)).*/\1/p')
+  [ -n "$ip" ] && say "  система сейчас отдаёт: $ip"
+}
+
+set_level() {
+  case " $LEVELS " in *" $1 "*) ;; *) err "Уровни: $LEVELS"; return 1;; esac
+  LEVEL=$1; save_conf; say "Уровень: $LEVEL — $(describe "$LEVEL"). Применить: nullads update"
+}
+
+extra_cmd() {
+  case " $EXTRAS_ALL " in *" $2 "*) ;; *) err "Доп. списки: $EXTRAS_ALL"; return 1;; esac
+  new=""
+  for e in $EXTRAS; do [ "$e" = "$2" ] || new="$new $e"; done
+  case $1 in
+    add) new="$new $2";;
+    del) ;;
+    *) err "nullads extra add|del <список>"; return 1;;
+  esac
+  EXTRAS=$(echo $new); save_conf
+  say "Доп. списки: ${EXTRAS:-нет}. Применить: nullads update"
+}
+
+set_all() {
+  case " $LEVELS " in *" $1 "*) LEVEL=$1;; *) err "Неизвестный уровень: $1"; return 1;; esac
+  shift; new=""
+  for e in "$@"; do case " $EXTRAS_ALL " in *" $e "*) new="$new $e";; esac; done
+  EXTRAS=$(echo $new); save_conf
+  say "Выбрано: $LEVEL${EXTRAS:+ + $EXTRAS}"
+}
+
+url_cmd() {
+  case $2 in http://*|https://*) ;; *) err "nullads url add|del https://…"; return 1;; esac
+  case $2 in *[\"\'\$\`\ \\]*) err "В адресе недопустимые символы"; return 1;; esac
+  new=""
+  for u in $CUSTOM; do [ "$u" = "$2" ] || new="$new $u"; done
+  [ "$1" = add ] && new="$new $2"
+  CUSTOM=$(echo $new); save_conf
+  say "Свои списки: ${CUSTOM:-нет}. Применить: nullads update"
+}
+
+do_auto() {
+  case $1 in
+    off|0) AUTO_DAYS=0;;
+    [1-9]|[1-9][0-9]) AUTO_DAYS=$1;;
+    *) err "nullads auto <дней 1–99>|off"; return 1;;
+  esac
+  save_conf
+  if [ "$AUTO_DAYS" = 0 ]; then say "Автообновление выключено"; else say "Автообновление: раз в $AUTO_DAYS дн."; fi
+}
+
+do_autoupdate() {
+  [ "${AUTO_DAYS:-0}" -gt 0 ] 2>/dev/null || return 0
+  [ "$PAUSED" = 1 ] && return 0
+  now=$(date +%s)
+  [ $((now - LAST_OK)) -ge $((AUTO_DAYS * 86400)) ] || return 0
+  { date; do_update; } > "$LOG" 2>&1
+}
+
+ago() {
+  [ "${1:-0}" -gt 0 ] 2>/dev/null || { say "никогда"; return; }
+  s=$(( $(date +%s) - $1 ))
+  if [ $s -lt 3600 ]; then say "$((s / 60)) мин назад"
+  elif [ $s -lt 86400 ]; then say "$((s / 3600)) ч назад"
+  else say "$((s / 86400)) дн назад"; fi
+}
+
+do_status() {
+  if mounted; then mnt=true; else mnt=false; fi
+  size=0; [ -f "$HOSTS" ] && size=$(wc -c < "$HOSTS" | tr -d ' ')
+  pick_downloader
+  if [ "$1" = --json ]; then
+    p=false; [ "$PAUSED" = 1 ] && p=true
+    nc=0; for u in $CUSTOM; do nc=$((nc + 1)); done
+    printf '{"version":"%s","level":"%s","extras":"%s","custom":%s,"domains":%s,"paused":%s,"mounted":%s,"last_ok":%s,"auto_days":%s,"size":%s,"dl":"%s"}\n' \
+      "$VERSION" "$LEVEL" "$EXTRAS" "$nc" "${DOMAINS:-0}" "$p" "$mnt" "${LAST_OK:-0}" "${AUTO_DAYS:-0}" "$size" "$DL"
+    return 0
+  fi
+  if [ "$PAUSED" = 1 ]; then st="на паузе"
+  elif [ "$mnt" = true ]; then st="включена"
+  else st="ждёт перезагрузки"; fi
+  say "NullAds $VERSION — блокировка $st"
+  say "  уровень:   $LEVEL — $(describe "$LEVEL")"
+  say "  доп.:      ${EXTRAS:-нет}${CUSTOM:+ + свои: $CUSTOM}"
+  say "  доменов:   ${DOMAINS:-0} ($((size / 1024)) КБ)"
+  say "  обновлено: $(ago "$LAST_OK")"
+  if [ "${AUTO_DAYS:-0}" -gt 0 ] 2>/dev/null; then say "  авто:      раз в $AUTO_DAYS дн."; else say "  авто:      выкл"; fi
+  say "  загрузчик: $DL"
+}
+
+show_lists() {
+  say "Уровни (выбирается один): nullads level <имя>"
+  for l in $LEVELS; do m=" "; [ "$l" = "$LEVEL" ] && m="*"; printf ' %s %-9s %s\n' "$m" "$l" "$(describe "$l")"; done
+  say "Дополнительные: nullads extra add|del <имя>"
+  for e in $EXTRAS_ALL; do m=" "; case " $EXTRAS " in *" $e "*) m="*";; esac; printf ' %s %-9s %s\n' "$m" "$e" "$(describe "$e")"; done
+}
+
+usage() {
+  cat <<EOF
+NullAds $VERSION — блокировка рекламы через hosts
+
+  nullads                 меню (в терминале)
+  nullads status          состояние
+  nullads update          скачать списки и применить
+  nullads lists           уровни и доп. списки
+  nullads level <имя>     уровень: $LEVELS
+  nullads extra add|del <имя>   доп.: $EXTRAS_ALL
+  nullads allow <домен>   в белый список (*.domain — с поддоменами)
+  nullads unallow <домен> убрать из белого
+  nullads block <домен>   в чёрный список
+  nullads unblock <домен> убрать из чёрного
+  nullads check <домен>   заблокирован ли домен
+  nullads pause | resume  выключить / включить блокировку
+  nullads auto <дни>|off  автообновление
+  nullads url add|del <URL>     свой список (hosts, домены или ||domain^)
+
+Белый/чёрный списки: $ALLOW, $BLOCK
+
+Списки делают HaGeZi (GPL-3.0) и StevenBlack (MIT), NullAds только скачивает их.
+Проект: $HOMEPAGE
+EOF
+  case $DONATE_URL in http*) say "Поддержать NullAds: $DONATE_URL";; esac
+}
+
+pause_key() { printf '\nEnter — назад '; read -r _; }
+
+menu() {
+  while :; do
+    clear 2>/dev/null
+    do_status
+    say ""
+    say " 1) Обновить списки"
+    say " 2) Уровень блокировки"
+    say " 3) Дополнительные списки"
+    say " 4) Разрешить домен"
+    say " 5) Заблокировать домен"
+    say " 6) Проверить домен"
+    if [ "$PAUSED" = 1 ]; then say " 7) Включить блокировку"; else say " 7) Поставить на паузу"; fi
+    say " 8) Автообновление"
+    say " 0) Выход"
+    printf '> '; read -r c || exit 0
+    case $c in
+      1) do_update; pause_key;;
+      2) i=1; for l in $LEVELS; do printf ' %s) %-9s %s\n' "$i" "$l" "$(describe "$l")"; i=$((i + 1)); done
+         printf 'Номер > '; read -r n
+         j=1; for l in $LEVELS; do [ "$j" = "$n" ] && set_level "$l" >/dev/null && do_update; j=$((j + 1)); done
+         pause_key;;
+      3) while :; do
+           i=1; for e in $EXTRAS_ALL; do m=" "; case " $EXTRAS " in *" $e "*) m="x";; esac
+             printf ' %s) [%s] %s\n' "$i" "$m" "$(describe "$e")"; i=$((i + 1)); done
+           printf 'Номер — вкл/выкл, u — применить, Enter — назад > '; read -r n
+           [ -z "$n" ] && break
+           [ "$n" = u ] && { do_update; pause_key; break; }
+           j=1; for e in $EXTRAS_ALL; do
+             if [ "$j" = "$n" ]; then
+               case " $EXTRAS " in *" $e "*) extra_cmd del "$e" >/dev/null;; *) extra_cmd add "$e" >/dev/null;; esac
+             fi; j=$((j + 1)); done
+         done;;
+      4) printf 'Домен > '; read -r d; [ -n "$d" ] && list_cmd allow "$d"; pause_key;;
+      5) printf 'Домен > '; read -r d; [ -n "$d" ] && list_cmd block "$d"; pause_key;;
+      6) printf 'Домен > '; read -r d; [ -n "$d" ] && do_check "$d"; pause_key;;
+      7) if [ "$PAUSED" = 1 ]; then do_resume; else do_pause; fi; pause_key;;
+      8) printf 'Раз в сколько дней (0 — выкл) > '; read -r n; do_auto "$n"; pause_key;;
+      0|q) exit 0;;
+    esac
+  done
+}
+
+case $1 in
+  ""|menu)   if [ -t 0 ]; then menu; else do_status; fi;;
+  status)    do_status "$2";;
+  update|u)  do_update;;
+  rebuild)   do_rebuild;;
+  lists)     show_lists;;
+  level)     set_level "$2";;
+  extra)     extra_cmd "$2" "$3";;
+  set)       shift; set_all "$@";;
+  allow|unallow|block|unblock) list_cmd "$1" "$2";;
+  check)     do_check "$2";;
+  pause|off) do_pause;;
+  resume|on) do_resume;;
+  auto)      do_auto "$2";;
+  url)       url_cmd "$2" "$3";;
+  autoupdate) do_autoupdate;;
+  version|-v) say "NullAds $VERSION";;
+  help|-h|--help) usage;;
+  *)         usage; exit 1;;
+esac
