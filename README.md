@@ -1,9 +1,13 @@
-# NullAds
+# NullAds — блокировщик рекламы для Android
+
+[English documentation](README.en.md) · [Скачать модуль](https://github.com/cfifBOOM/nullads/releases)
+
+**NullAds — free systemless ad blocker for Android (Magisk, KernelSU, SukiSU, APatch).**
 
 Блокировка рекламы, трекеров и телеметрии на Android через `hosts`, для **KernelSU / SukiSU / APatch / Magisk**.
 Модуль сам скачивает списки у авторов, собирает из них hosts и подменяет системный файл без изменения раздела `/system`.
 
-<p align="center"><img src="docs/webui.png" width="320" alt="WebUI NullAds"></p>
+<p align="center"><img src="docs/webui.png" width="320" alt="NullAds — интерфейс Android ad blocker"></p>
 
 ## Возможности
 
@@ -79,6 +83,8 @@ nullads url add https://…      свой список (hosts, домены ил
 ---
 
 ### English
+
+[Full English documentation and installation guide](README.en.md).
 
 NullAds is a systemless hosts-based ad/tracker blocker module for KernelSU, SukiSU, APatch and Magisk.
 It downloads [HaGeZi](https://github.com/hagezi/dns-blocklists) (GPL-3.0) and [StevenBlack](https://github.com/StevenBlack/hosts) (MIT)
